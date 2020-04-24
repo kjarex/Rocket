@@ -1,6 +1,7 @@
 //! Types representing various errors that can occur in a Rocket application.
 
 use std::{io, fmt};
+use std::path::PathBuf;
 use std::sync::atomic::{Ordering, AtomicBool};
 
 use yansi::Paint;
@@ -26,6 +27,8 @@ pub enum LaunchErrorKind {
     Collision(Vec<(Route, Route)>),
     /// A launch fairing reported an error.
     FailedFairings(Vec<&'static str>),
+    /// Failed to take a lock on an existing Unix domain socket.
+    FailedSocketLock(PathBuf, io::Error),
     /// An otherwise uncategorized error occurred during launch.
     Unknown(Box<dyn std::error::Error + Send + Sync>)
 }
@@ -145,6 +148,7 @@ impl fmt::Display for LaunchErrorKind {
             LaunchErrorKind::Io(ref e) => write!(f, "I/O error: {}", e),
             LaunchErrorKind::Collision(_) => write!(f, "route collisions detected"),
             LaunchErrorKind::FailedFairings(_) => write!(f, "a launch fairing failed"),
+            LaunchErrorKind::FailedSocketLock(_, ref e) => write!(f, "lock socket failed: {}", e),
             LaunchErrorKind::Unknown(ref e) => write!(f, "unknown error: {}", e)
         }
     }
@@ -175,6 +179,7 @@ impl std::error::Error for LaunchError {
             LaunchErrorKind::Io(_) => "an I/O error occurred during launch",
             LaunchErrorKind::Collision(_) => "route collisions were detected",
             LaunchErrorKind::FailedFairings(_) => "a launch fairing reported an error",
+            LaunchErrorKind::FailedSocketLock(..) => "failed to lock an existing unix domain socket",
             LaunchErrorKind::Unknown(_) => "an unknown error occurred during launch"
         }
     }
@@ -189,6 +194,20 @@ impl Drop for LaunchError {
         match *self.kind() {
             LaunchErrorKind::Bind(ref e) => {
                 error!("Rocket failed to bind network socket to given address/port.");
+                #[cfg(windows)]
+                {
+                    match e {
+                        hyper::Error::Io(ref io_err) => {
+                            if let Some(err_code) = io_err.raw_os_error() {
+                                if err_code == 10047 {
+                                    // An address incompatible with the requested protocol was used
+                                    info_!("Note: Unix domain socket only works on Windows 10/Server version 1809 or later.");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 panic!("{}", e);
             }
             LaunchErrorKind::Io(ref e) => {
@@ -211,6 +230,12 @@ impl Drop for LaunchError {
                 }
 
                 panic!("launch fairing failure");
+            }
+            LaunchErrorKind::FailedSocketLock(ref path, ref e) => {
+                error!("Rocket failed to lock an existing Unix domain socket:");
+                info_!("{}", Paint::default(path.display()).bold());
+                info_!("Note: Another instance of Rocket may be running on the same socket.");
+                panic!("{}", e);
             }
             LaunchErrorKind::Unknown(ref e) => {
                 error!("Rocket failed to launch due to an unknown error.");

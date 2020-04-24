@@ -120,6 +120,7 @@ pub mod http {
     pub use rocket_http::*;
 }
 
+#[cfg(any(unix, windows))] #[macro_use] mod unix;
 mod router;
 mod rocket;
 mod codegen;
